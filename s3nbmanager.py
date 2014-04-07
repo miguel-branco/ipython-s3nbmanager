@@ -77,7 +77,7 @@ def is_folder(bucket, path):
 	return True
 
 def get_notebooks_bucket(userid):
-	s3_bucket = 'ipythonnotebooks'
+	s3_bucket = 'rawlabs-notebooks'
 	conn = S3Connection()
 	return conn.get_bucket(s3_bucket)
 
