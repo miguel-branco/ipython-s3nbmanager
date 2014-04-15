@@ -46,12 +46,12 @@ def get_nb_bucket_settings():
 	config.read(os.environ.get('IPYTHON_S3_CONFIG'))	
 	bucket = config.get('S3', 'bucket')
 	folder_format = config.get('S3', 'folder')
-	uuid = config.get('S3', 'uuid')
-	#formats the uuid into the folder 
-	folder = folder_format % uuid
+	uid = config.get('S3', 'uid')
+	#formats the user id into the folder 
+	folder = folder_format % uid
 
 	conn = S3Connection()
-	folder ='DropBox/'+ uuid
+	folder ='DropBox/'+ uid
 	#forces the folder to end with '/'
 	if(not folder.endswith('/')): folder += '/'
 
