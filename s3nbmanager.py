@@ -4,6 +4,8 @@ Authors:
 
 * Brian Granger
 * Zach Sailer
+
+Modified by Cesar Matos
 """
 
 
@@ -29,93 +31,79 @@ from IPython.utils import tz
 from IPython.html.utils import is_hidden, to_os_path
 
 
-import ConfigParser
-
-
-
 def sort_key(item):
     """Case-insensitive sorting."""
     return item['name'].lower()
 
-
-
 def get_nb_bucket_settings():
-
-	# reads the configuration file
-	config = ConfigParser.RawConfigParser()
-	config.read(os.environ.get('IPYTHON_S3_CONFIG'))	
-	bucket = config.get('S3', 'bucket')
-	folder_format = config.get('S3', 'folder')
-	uid = config.get('S3', 'uid')
-	#formats the user id into the folder 
-	folder = folder_format % uid
+	bucket = 'rawlabs-notebooks'
+	folder = 'dropbox/%s' % os.environ['DROPBOX_UID']
+	if not folder.endswith('/'):
+		folder += '/'
 
 	conn = S3Connection()
-	folder ='DropBox/'+ uid
-	#forces the folder to end with '/'
-	if(not folder.endswith('/')): folder += '/'
+	bucket = conn.get_bucket(bucket)
 
-	return conn.get_bucket(bucket) , folder
+	# Create folder in case user is logging in for the first time
+	new_key_from_string(bucket, folder, '')
 
+	return bucket, folder
 
-def list_keys(bucket, path, extension = None):
-	"""this will list all keys in a bucket and check for an extension"""
+def list_keys(bucket, path, suffix=None):
+	"""list all keys in a bucket and check for suffix"""
 
 	# Apparently there is no easy way of doing this except to loop over the result
 	# chek the parameters delimiter='', marker=''
 	# then the list returns boto.s3.prefix.Prefix objects on matches
-	out = []
+	files = []
 	path = path.strip('/')
-	l = bucket.list(path)	
-	for k in l:	
-		name = k.name.replace(path, '').lstrip('/')
-		if name \
-			and ((extension == None) or name.endswith(extension)) \
-			and not '/' in name.strip('/'):
-			out.append(name)
-	return out
+	for key in bucket.list(path):
+		relative_path = key.name.replace(path, '').lstrip('/')
+		if not relative_path:
+			# Empty
+			continue
 
+		if '/' in relative_path.strip('/'):
+			# Skip sub-folders
+			continue
+
+		if not suffix or relative_path.endswith(suffix):
+			files.append(relative_path)
+	return files
 
 def key_exists(bucket, path):
-	key = bucket.get_key(path)	
-	return not (key == None)
+	return bucket.get_key(path) is not None
 
 def is_hidden(bucket, path):	
-	"""For the time being just checks if the filename starts with '.' 
-		In the future we have to implement some metadata or something else on S3 to mark as hidden
+	"""Check if the filename starts with '.'.
 	"""
-	#TODO: check why this is not working
+	# TODO: Implement metadata on S3 to mark as hidden
 	parts = path.split('/')
 	return parts[-1].startswith('.')
 
-
 def is_folder(bucket, path):
-	"""For the time being just checks if the name ends with '/'"""
+	"""Check if path ends with '/'"""
 
-	if not (path.endswith('/')): path += '/'
-	key = bucket.get_key(path)		
-	if (key == None):
-		return False
-	return True
-
+	if not path.endswith('/'):
+		path += '/'
+	return bucket.get_key(path)
 
 def move_key(bucket, new_name, old_name):
 	new_name = new_name.strip('/')
 	if key_exists(bucket, new_name):
 	    raise web.HTTPError(409, u'Notebook with name already exists: %s' % new_name)
+
 	old_key = bucket.get_key(old_name.strip('/'))
-	if(old_key == None):
+	if not old_key:
 		raise web.HTTPError(409, u'Notebook with name does not exists: %s' % old_name)
 	
 	new_key = bucket.copy_key(new_name,bucket.name,old_name)
 	bucket.delete_key(old_key)
 	
-
 def new_key_from_string(bucket, name, contents):
 	key = boto.s3.key.Key(bucket)
 	key.key = name
 	key.set_contents_from_string(contents)
-
 
 #-----------------------------------------------------------------------------
 # Classes
@@ -133,43 +121,33 @@ class S3NotebookManager(NotebookManager):
 		"""
 	)	
 
-	#for the time being this stays hardcoded like this
-
-	notebook_dir = '/'
-
 	def __init__(self, *args, **kwargs):		
 		self.bucket, self.notebook_dir = get_nb_bucket_settings()
 		self.log.info("bucket_name = %s ,  bucket_folder = %s"% (self.bucket.name, self.notebook_dir))
 		
 	def _notebook_dir_changed(self, name, old, new):
-		"""Do a bit of validation of the notebook dir."""		
-		
-		#if is_folder(self._bucket, new) == False:
-		#	raise TraitError("notebook dir %r is not a directory" % new)
+		"""Do a bit of validation of the notebook dir."""
 		self.notebook_dir = new
 
 	checkpoint_dir = Unicode(config=True,
-		help="""The location in which to keep notebook checkpoints
+		help="""The relative location in which to keep notebook checkpoints
 		
-		By default, it is notebook-dir/.ipynb_checkpoints
+		By default, it is .ipynb_checkpoints/
 		"""
 	)
 	def _checkpoint_dir_default(self):
-		#CTM: This is hardcoded here, it was already like this before
-		#Also changed the path is not appended as we create a checkpoint per folder per folder where the notebook is
-		path = '.ipynb_checkpoints/'
-		#path = self.notebook_dir+ '.ipynb_checkpoints/'
-		return path
+		return '.ipynb_checkpoints/'
     
 	def _checkpoint_dir_changed(self, name, old, new):
 		"""do a bit of validation of the checkpoint dir"""
-		#if the path does not end in '/' it will add it (to force it to be a folder)
-		if (new.endswith('/') == False):
-			new += '/'		
+
+		if not new.endswith('/'):
+			new += '/'
+
 		if not key_exists(self.bucket, new):
 			self.log.info("Creating checkpoint dir %s", new)
 			try:
-				#will create new folder like this (in S3 there is no difference between creating a folder or a file)
+				# TODO: Create empty key instead of empty file(?)
 				new_key_from_string(self.bucket, new, '')
 			except:
 				raise TraitError("Couldn't create checkpoint dir %r" % new)
@@ -179,17 +157,15 @@ class S3NotebookManager(NotebookManager):
 	def _copy(self, src, dest):
 		"""copy src to dest          
 		"""
-		# for the time being the copying between buckets is not suported
-		srcbucket_name = self.bucket.name
 		try:
-			self.bucket.copy_key(dest, srcbucket_name, src)
+			self.bucket.copy_key(dest, self.bucket.name, src)
 		except boto.exception.S3CopyError as e:
 			self.log.debug("bucket copy failed for on %s failed", dest, exc_info=True)
 			raise e
 
 	def get_notebook_names(self, path=''):
 		"""List all notebook names in the notebook dir and path."""
-		self.log.debug("getting nb names %s" %path)
+		self.log.debug("getting nb names %s" % path)
 		os_path = self._get_os_path(path = path)
 					
 		return list_keys(self.bucket, os_path, self.filename_ext)
@@ -208,13 +184,11 @@ class S3NotebookManager(NotebookManager):
 		exists : bool
 			Whether the path is indeed a directory.
 		"""		
-		
 		os_path = self._get_os_path(path=path)
-			
-		if not os_path.endswith('/') : os_path +='/'
+		if not os_path.endswith('/'):
+			os_path += '/'
 		return is_folder(self.bucket, os_path)
 	
-
 	def is_hidden(self, path):
 		"""Does the API style path correspond to a hidden directory or file?
 
@@ -252,16 +226,16 @@ class S3NotebookManager(NotebookManager):
 		    server started), the relative path, and the filename with the
 		    current operating system's url.
 		"""
-		out_path= path.strip('/')
+		out_path = path.strip('/')
 		nb_dir = self.notebook_dir.strip('/')
 
 		if not out_path:
 			out_path = nb_dir
-		elif nb_dir :
+		elif nb_dir:
 			out_path = nb_dir + '/' + out_path
 
 		if  name:
-			out_path +=  '/' + name.strip('/')
+			out_path += '/' + name.strip('/')
 
 		return out_path
 
@@ -291,58 +265,45 @@ class S3NotebookManager(NotebookManager):
 		os_path = self._get_os_path('', path)
 
 		self.log.info("listing dir %s, nb_dir= %s", path, self.notebook_dir)
-		if not os_path.endswith('/'): os_path += '/'
-		if(not key_exists(self.bucket, os_path)):
+		if not os_path.endswith('/'):
+			os_path += '/'
+
+		if not key_exists(self.bucket, os_path):
 			self.log.error("path does not exist " + os_path )
 			raise web.HTTPError(404, u'directory does not exist: %r' % os_path)
-		elif(is_hidden(self.bucket, os_path)):
+		elif is_hidden(self.bucket, os_path):
 			self.log.error("Refusing to serve hidden directory %s, via 404 Error" % os_path )
 			raise web.HTTPError(404, u'directory does not exist: %s' % path)
 
-		# the '/' makes it list dirs only (kind of) remember s3 has keys				
-		dir_names =  list_keys(self.bucket, os_path, "/")
-		dirs=[]
-
+		dir_names = list_keys(self.bucket, os_path, '/')
+		dirs = []
 		for name in dir_names:
-
 			dir_path = self._get_os_path(name, path)
 			self.log.debug('checking folder %s name =%s path =%s' % (dir_path, name, path))
-			if self.should_list(dir_path)  and not is_hidden(self.bucket, dir_path):		
+			if self.should_list(dir_path) and not is_hidden(self.bucket, dir_path):		
 				model = self.get_dir_model(name, path)
 				dirs.append(model)
 
-		dirs = sorted(dirs, key=sort_key)
-
-		return dirs
+		return sorted(dirs, key=sort_key)
 
 	# TODO: Remove this after we create the contents web service and directories are
 	# no longer listed by the notebook web service.
 	def get_dir_model(self, name, path=''):
-		"""Get the directory model given a directory name and its API style path"""		
-
+		"""Get the directory model given a directory name and its API style path"""
 		
-		#CTM: here we have to have the '/'
+		# Include '/' since path must be a folder
 		os_path = self._get_os_path(name, path) + '/'
-		
+
 		key = self.bucket.get_key(os_path)
 		
-		#CTM: here we have to check UTC and the struct_time 
-		#the original code was using tz.utcfromtimestamp(info.st_ctime)
+		# TODO: Check datetime format (UTC vs struct time); the original code was using tz.utcfromtimestamp(info.st_ctime)
 
-		if(key == None):
+		if not key:
 			self.log.error("dir model '%s' not found"% (os_path))
 			raise web.HTTPError(404, u'directory does not exist: %s/%s' % (path,name) )
 
-		model ={}
-		model['name'] = name
-		model['path'] = path
-		#CTM: check if this needs the struct_time or a datetime object
-		model['last_modified'] = key.last_modified
-		# for the time being the creation time is the same as last modified
-		model['created'] = key.last_modified
-		model['type'] = 'directory'
-
-		return model
+		# TODO: Check if last_modified & created msy be structs or datetime objects
+		return dict(name=name, path=path, last_modified=key.last_modified, created=key.last_modified, type='directory')
 
 	def list_notebooks(self, path):
 		"""Returns a list of dictionaries that are the standard model
@@ -388,16 +349,12 @@ class S3NotebookManager(NotebookManager):
 		os_path = self._get_os_path(name, path)
 
 		key = self.bucket.get_key(os_path)
-		# Create the notebook model.
-		model ={}
+		model = {}
 		model['name'] = name
 		model['path'] = path
-		#CTM: check if this needs the struct_time or a datetime object
 		model['last_modified'] = key.last_modified
-		# for the time being the creation time is the same as last modified
 		model['created'] = key.last_modified
 		model['type'] = 'notebook'
-
 		if content:
 			nb = current.reads(key.get_contents_as_string(), u'json')
 			self.mark_trusted_cells(nb, name, path)
@@ -415,15 +372,12 @@ class S3NotebookManager(NotebookManager):
 		# One checkpoint should always exist
 		if self.notebook_exists(name, path) and not self.list_checkpoints(name, path):	
 			self.create_checkpoint(name, path)
-		#CTM: here we have to strip the the new path (have to chek where the name is assigned)
+
 		new_path = model.get('path', path)
 		new_name = model.get('name', name)
-
-
 		if path != new_path or name != new_name:
 			self.log.info('renaming notebook %s %s->%s %s' (path, name, new_path, new_name))
 			self.rename_notebook(name, path, new_name, new_path)
-
 		
 		# Save the notebook file
 		self.log.debug('getting json content')
@@ -438,7 +392,6 @@ class S3NotebookManager(NotebookManager):
 		try:
 			self.log.debug("Autosaving notebook %s", os_path)
 			new_key_from_string(self.bucket, os_path, current.writes(nb,  u'json'))
-
 		except Exception as e:
 			self.log.debug(e)
 			raise web.HTTPError(400, u'Unexpected error while autosaving notebook: %s %s' % (os_path, e))
@@ -448,14 +401,12 @@ class S3NotebookManager(NotebookManager):
 			py_path = os.path.splitext(os_path)[0] + '.py'
 			self.log.debug("Writing script %s", py_path)
 			try:
-				
 				new_key_from_string(self.bucket, py_path,current.writes(nb, u'py')) 
 			except Exception as e:
 				self.log.error(e)
 				raise web.HTTPError(400, u'Unexpected error while saving notebook as script: %s %s' % (py_path, e))
 
-		model = self.get_notebook(new_name, new_path, content=False)
-		return model
+		return self.get_notebook(new_name, new_path, content=False)
 
 	def update_notebook(self, model, name, path=''):
 		"""Update the notebook's path and/or name"""
@@ -493,11 +444,9 @@ class S3NotebookManager(NotebookManager):
 		new_os_path = self._get_os_path(new_name, new_path)
 		old_os_path = self._get_os_path(old_name, old_path)
 
-		
-		#this was always returning as true
-		# Should we proceed with the move?
 		if key_exists(self.bucket, new_os_path):
 		    raise web.HTTPError(409, u'Notebook with name already exists: %s' % new_os_path)
+
 		if self.save_script:
 			old_py_path = os.path.splitext(old_os_path)[0] + '.py'
 			new_py_path = os.path.splitext(new_os_path)[0] + '.py'
@@ -541,16 +490,16 @@ class S3NotebookManager(NotebookManager):
 		    ext=self.filename_ext,
 		)
 		
-		#CTK: the checkpoint saving overwrites notebooks with the same name,
-		#if two notebooks are in different folders but have the same name the checkpoints are saved on top of each other
-		# so I changed to do it like this
-		path1 = self._get_os_path(self.checkpoint_dir,path = path)
+		# Checkpoints are stored in relative directories
+		# e.g. given:
+		# folder1/notebook1.py
+		# ... the checkpoint is at ...
+		# folder1/<checkpoint directory>/notebook1.py   
+		base_path = self._get_os_path(self.checkpoint_dir, path=path)
 		self.log.info("checkpoint path %s"%path1)
-		cp_path = path1 +'/'+filename
-		self.log.info("checkpoint path + filename %s"%cp_path)
-		#cp_path = os.path.join(path, self.checkpoint_dir, filename)
-
-		return cp_path
+		full_path = base_path +'/'+filename
+		self.log.info("checkpoint path + filename %s" % full_path)
+		return full_path
 
 	def get_checkpoint_model(self, checkpoint_id, name, path=''):
 		"""construct the info dict for a given checkpoint"""
@@ -577,7 +526,7 @@ class S3NotebookManager(NotebookManager):
 		cp_path = self.get_checkpoint_path(checkpoint_id, name, path)
 		
 		self.log.info("creating checkpoint for notebook %s", name)
-		if(not key_exists(self.bucket, self.checkpoint_dir)):
+		if not key_exists(self.bucket, self.checkpoint_dir):
 			new_key_from_string(self.bucket, self.checkpoint_dir, '')
 
 		self._copy(nb_path, cp_path)
@@ -593,7 +542,7 @@ class S3NotebookManager(NotebookManager):
 		self.log.info("listing checkpoint %s %s", path, name)
 		checkpoint_id = "checkpoint"
 		os_path = self.get_checkpoint_path(checkpoint_id, name, path)
-		if not  key_exists(self.bucket, os_path):
+		if not key_exists(self.bucket, os_path):
 		    return []
 		else:
 		    return [self.get_checkpoint_model(checkpoint_id, name, path)]
@@ -614,8 +563,6 @@ class S3NotebookManager(NotebookManager):
 		# ensure notebook is readable (never restore from an unreadable notebook)
 		key = self.bucket.get_key(cp_path)
 		nb = current.reads(key.get_contents_as_string(), u'json')
-#		with io.open(cp_path, 'r', encoding='utf-8') as f:
-#		    current.read(f, u'json')
 		self._copy(cp_path, nb_path)
 		self.log.debug("copying %s -> %s", cp_path, nb_path)
 
