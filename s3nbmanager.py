@@ -83,10 +83,9 @@ def is_hidden(bucket, path):
 
 def is_folder(bucket, path):
 	"""Check if path ends with '/'"""
-
 	if not path.endswith('/'):
 		path += '/'
-	return bucket.get_key(path)
+	return bucket.get_key(path) is not None
 
 def move_key(bucket, new_name, old_name):
 	new_name = new_name.strip('/')
@@ -496,8 +495,7 @@ class S3NotebookManager(NotebookManager):
 		# ... the checkpoint is at ...
 		# folder1/<checkpoint directory>/notebook1.py   
 		base_path = self._get_os_path(self.checkpoint_dir, path=path)
-		self.log.info("checkpoint path %s"%path1)
-		full_path = base_path +'/'+filename
+		full_path = base_path +'/'+ filename
 		self.log.info("checkpoint path + filename %s" % full_path)
 		return full_path
 
